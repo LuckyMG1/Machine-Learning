@@ -36,9 +36,8 @@ public class Program {
 
     // load each one into a 28x28 matrix and feed it to the NN
     // set up images
-    int numberOfImages = imagesBR.ReadInt32();
     int magicNumber1 = imagesBR.ReadInt32();
-
+    int numberOfImages = imagesBR.ReadInt32();
     int rowNumber = imagesBR.ReadInt32();
     int colNumber = imagesBR.ReadInt32();
 
@@ -49,7 +48,7 @@ public class Program {
     byte[][] pixels = new byte[28][];
     for(int i = 0; i < pixels.Length; i++) { pixels[i] = new byte[28]; }
 
-    for(int x = 0; x < numberOfImages; x++) {
+    for(int x = 0; x < 60000; x++) {
       for(int y = 0; y < 28; y++) {
         for(int z = 0; z < 28; z++) {
           byte px = imagesBR.ReadByte();
@@ -58,11 +57,13 @@ public class Program {
       }
       byte label = labelsBR.ReadByte();
       DigitImage dImage = new DigitImage(pixels, label);
+      dImage.ConvertBinary();
       networkInputLayer.LoadImage(dImage);
       networkInputLayer.FeedForward();
-      networkOutputLayer.BackPropagate();
-      Console.WriteLine($"Image: {x+1} Loaded");
-      Console.ReadLine();
+      if((x+1)% 10 == 0) {
+        Console.WriteLine($"Image: {x+1} Loaded");
+        Console.WriteLine($"Loss:{networkOutputLayer.Loss}");
+      }
     }
 
     // close files
@@ -90,7 +91,13 @@ public class DigitImage
 
       this.label = label;
     }
-
+    public void ConvertBinary() {
+      for(int i = 0; i < 28; ++i) {
+        for(int j = 0; j < 28; ++j) {
+          if(this.pixels[i][j] >= 10) { this.pixels[i][j] = 1; }
+        }
+      }
+    }
     public override string ToString()
     {
       string s = "";
@@ -101,11 +108,8 @@ public class DigitImage
           if (this.pixels[i][j] == 0) {
             s += " "; // white
           }
-          else if (this.pixels[i][j] > 200) {
-            s += "O"; // black
-          }
           else {
-            s += "."; // gray
+            s += "0"; // black
           }
         }
         s += "\n";
@@ -118,7 +122,10 @@ public class DigitImage
 public class Layer {
   public float[] Inputs;
   public float[][] Weights;
-  protected float Bias;
+  public float[] Bias;
+
+  protected float relu_parameter;
+
   public Layer NextLayer;
   public Layer PreviousLayer;
 
@@ -131,7 +138,7 @@ public class Layer {
     return _weights;
   }
 
-  protected float ReLU(float x) => (float)(x > 0 ? x : 0);
+  protected float LeakyReLU(float x) => (float)(x > 0 ? x : x*relu_parameter);
 
   protected float DotProduct(float[] _array1, float[] _array2) {
     float sum = 0;
@@ -151,14 +158,15 @@ public class Layer {
     float[] results = new float[this.Weights.Length];
     // perform dotproduct operation
     for(int i = 0; i < this.Weights.Length; i++) {
-      results[i] = DotProduct(this.Inputs, this.Weights[i]) + Bias;
+      results[i] = DotProduct(this.Inputs, this.Weights[i]) + Bias[i];
     }
     // normalise results
-    float[] normalisedResults = Statistics.NormaliseDataSet(results);
+    // float[] normalisedResults = Statistics.NormaliseDataSet(results);
     // pass normalised results through relu function
+    
     float[] activatedResults = new float[results.Length];
     for(int n = 0; n < results.Length; n++) {
-      activatedResults[n] = ReLU(normalisedResults[n]);
+      activatedResults[n] = LeakyReLU(results[n]);
     }
     // set next layer inputs to these outputs
     this.NextLayer.Inputs = activatedResults;
@@ -171,20 +179,21 @@ public class Layer {
       // generate an array of random weights for each new neuron
       this.Weights[w] = InitialiseWeights(weight_count);
     }
-    this.Bias = 0;
+    this.Bias = new float[next_weight_count];
+    this.relu_parameter = 0.1f;
   }
 }
 
 public class InputLayer : Layer {
-  byte[] PixelNodes;
+  public float[] PixelNodes;
   byte Label;
 
   public void LoadImage(DigitImage _image) {
-    this.PixelNodes = new byte[28*28];
+    this.PixelNodes = new float[28*28];
     int pixelNumber = 0;
     for(int i = 0; i < 28; i++) {
       for(int j = 0; j < 28; j++) {
-        this.PixelNodes[pixelNumber] = _image.pixels[i][j];
+        this.PixelNodes[pixelNumber] = _image.pixels[i][j] / 256f;
         pixelNumber++;
       }
     }
@@ -205,14 +214,12 @@ public class InputLayer : Layer {
     float[] results = new float[this.Weights.Length];
     // perform dotproduct operation
     for(int i = 0; i < this.Weights.Length; i++) {
-      results[i] = DotProduct(this.PixelNodes, this.Weights[i]) + Bias;
+      results[i] = DotProduct(this.PixelNodes, this.Weights[i]) + Bias[i];
     }
-    // batch normalise results
-    float[] normalisedResults = Statistics.NormaliseDataSet(results);
-    // pass normalised results through relu function
+    // float[] normalisedResults = Statistics.NormaliseDataSet(results
     float[] activatedResults = new float[results.Length];
     for(int n = 0; n < results.Length; n++) {
-      activatedResults[n] = ReLU(normalisedResults[n]);
+      activatedResults[n] = LeakyReLU(results[n]);
     }
     // set next layer inputs to these outputs
     this.NextLayer.Inputs = activatedResults;
@@ -230,8 +237,11 @@ public class InputLayer : Layer {
 }
 
 public class OutputLayer : Layer {
-  protected float LearningRate;
-  protected float[] OutputProbabilities;
+  public float LearningRate;
+  private float[] OutputProbabilities;
+  private int[] TruthLabel;
+
+  public float Loss;
 
   private float[] Softmax(float[] x) {
     // calculate sum of e^(x_i)
@@ -246,11 +256,10 @@ public class OutputLayer : Layer {
     return probabilities;
   }
 
-
-  private float CrossEntropyLoss(float[] _probabilities, float[] _truth_label) {
+  private float CrossEntropyLoss(float[] _probabilities, int[] _truth_label) {
     float sum = 0;
     for(int i = 0; i < _probabilities.Length; i++) {
-      sum += _truth_label[i]*(float)Math.Log(_probabilities[i]);
+      sum += (float)_truth_label[i]*(float)Math.Log(_probabilities[i]);
     }
     return -sum;
   }
@@ -267,14 +276,89 @@ public class OutputLayer : Layer {
     return truth_label;
   }
 
-  public new float FeedForward(float[] _new_inputs, byte _label) {
-    this.OutputProbabilities = Softmax(_new_inputs);
-    int[] truth_label = GetTruthLabel(_new_inputs, _label);
-    CalculateDerivative(this, truth_label, null);
-    return BackPropagate();
+  private float[] LeakyReLUDerivative(float[] x) {
+    float[] derivative_x = new float[x.Length];
+    for(int i = 0; i < x.Length; i++) {
+      derivative_x[i] = x[i] > 0 ? 1 : relu_parameter;
+    }
+    return derivative_x;
   }
 
-  public T[][] MatrixTranspose<T>(T[][] matrix) {
+  public new float FeedForward(float[] _new_inputs, byte _label) {
+    this.OutputProbabilities = Softmax(_new_inputs);
+    this.TruthLabel = GetTruthLabel(_new_inputs, _label);
+    this.Loss = CrossEntropyLoss(this.OutputProbabilities, this.TruthLabel);
+    CalculateDerivative(this, null);
+    return 1;
+  }
+
+  public void CalculateDerivative(Layer currentLayer, float[][] delta) {
+    float[][] derivatives;
+    if(currentLayer.NextLayer == null) {
+      derivatives = new float[this.OutputProbabilities.Length][];
+      for(int i = 0; i < this.OutputProbabilities.Length; i++) {
+        derivatives[i] = new float[] { this.OutputProbabilities[i] - this.TruthLabel[i] };
+      }
+      CalculateDerivative(currentLayer.PreviousLayer, derivatives);
+    } else {
+      //relu derivative wrt activations (currentLayer.NextLayer.Inputs)
+      float[][] reluDerivative = new float[1][];
+      reluDerivative[0] = LeakyReLUDerivative(currentLayer.NextLayer.Inputs);
+      reluDerivative = Matrix.Transpose(reluDerivative);
+
+      //delta elementwise matrix multiplication with relu derivative
+      float[][] EMM = Matrix.EelementwiseMultiplication(delta, reluDerivative);
+
+      //matrix multiplication weights transposed and the e.m.m
+      float[][] newDelta = Matrix.Multiplication(Matrix.Transpose(currentLayer.Weights),EMM);
+
+      //go to previous Layer
+      if(currentLayer.PreviousLayer != null) {
+        CalculateDerivative(currentLayer.PreviousLayer, newDelta);
+      }
+      float[][] reshapedInputs = new float[1][];
+      if(currentLayer.PreviousLayer == null) {
+        float[] temp = new float[((InputLayer)currentLayer).PixelNodes.Length];
+        for(int i = 0; i < temp.Length; i++) {
+          temp[i] = (float)((InputLayer)currentLayer).PixelNodes[i];
+        }
+        reshapedInputs[0] = temp;
+      } else {
+        reshapedInputs[0] = currentLayer.Inputs;
+      }
+      float[][] gradient = Matrix.Multiplication(EMM,reshapedInputs);
+
+      // update values for weights and biases
+      float[] sumOfEMM = new float[EMM.Length];
+      float temp_sum;
+
+      for(int i = 0; i < EMM.Length; i++) {
+        temp_sum = 0;
+        foreach(float item in EMM[i]) {
+          temp_sum += item;
+        }
+        sumOfEMM[i] = temp_sum;
+      }
+
+      for(int wx = 0; wx < currentLayer.Weights.Length; wx++) {
+        for(int wy = 0; wy < currentLayer.Weights[0].Length; wy++) {
+          currentLayer.Weights[wx][wy] -= this.LearningRate * gradient[wx][wy];
+        }
+        currentLayer.Bias[wx] -= this.LearningRate * sumOfEMM[wx];
+      }
+    }
+  }
+
+  public OutputLayer() : base(0,0) {
+    this.Weights = null;
+    this.NextLayer = null;
+    this.LearningRate = 0.1f; // init to low value (0.1-0.5)
+  }
+}
+
+static class Matrix {
+
+  public static T[][] Transpose<T>(T[][] matrix) {
     T[][] transposed_matrix = new T[matrix[0].Length][];
     for(int i = 0; i < transposed_matrix.Length; i++) {
       transposed_matrix[i] = new T[matrix.Length];
@@ -285,53 +369,33 @@ public class OutputLayer : Layer {
     return transposed_matrix;
   }
 
-  public T[][] MatrixMultiplication<T>(T[][] mat1, T[][] mat2) {
-    T[][] result = new T[mat1.Length][];
+  public static float[][] Multiplication(float[][] mat1, float[][] mat2) {
+    float[][] result = new float[mat1.Length][];
     for(int i = 0; i < mat1.Length; i++) {
-      result[i] = new T[mat2[0].Length];
-      for(int j = 0; j < mat2[0].Length) {
-        result[i][j] = mat1[i][j] * mat2[j][i];
+      result[i] = new float[mat2[0].Length];
+      for(int j = 0; j < mat2[0].Length; j++) {
+        result[i][j] = 0;
+        for(int k = 0; k < mat2.Length; k++) {
+          result[i][j] = mat1[i][k] * mat2[k][j];
+        }
       }
     }
     return result;
   }
 
-  public float CalculateDerivative(Layer currentLayer, int[] _truth_label, float[] delta) {
-    // List<float> derivatives = new List<float>();
-    float[] derivatives;
-    if(currentLayer.NextLayer == null) {
-      // float loss = CrossEntropyLoss(output_probabilities, _truth_label, truth_label);
-      derivatives = new float[this.OutputProbabilities.Length];
-      for(int i = 0; i < this.OutputProbabilities.Length; i++) {
-        derivatives[i] = this.OutputProbabilities[i] - _truth_label[i];
+  public static float[][] EelementwiseMultiplication(float[][] mat1, float[][] mat2) {
+    float[][] mat_result = new float[mat1.Length][];
+    for(int i = 0; i < mat1.Length && mat1.Length == mat2.Length; i++) {
+      mat_result[i] = new float[mat1[0].Length];
+      for(int j = 0; j < mat1[0].Length && mat1[0].Length == mat2[0].Length; j++) {
+        mat_result[i][j] = mat1[i][j] * mat2[i][j];
       }
-      return CalculateDerivative(currentLayer.PreviousLayer, _truth_label, derivatives);
     }
-    derivatives = new float[currentLayer.Weights.Length];
-    // find hidden layer derivative
-    // transpose weights
-    float[][] transposedWeights = MatrixTranspose(currentLayer.Weights);
-    // matrix multiplication
-    
-    for(int w = 0; w < currentLayer.Weights.Length; w++) {
-      //derivatives[w] = DotProduct(currentLayer.Weights[w], delta);
-    }
-    return 1;
-    // find input layer derivative
-  }
-
-  public float BackPropagate() {
-    return 1;
-  }
-
-  public OutputLayer() : base(0,0) {
-    this.Weights = null;
-    this.NextLayer = null;
-    this.LearningRate = 0.2f; // init to low value (0.2-0.5)
+    return mat_result;
   }
 }
 
-class Statistics {
+static class Statistics {
   public static float Mean(float[] data_set) {
     float sum = 0;
     for(int i = 0; i < data_set.Length; i++) { sum += data_set[i]; }
